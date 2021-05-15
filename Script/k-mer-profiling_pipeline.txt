@@ -1,0 +1,173 @@
+A k-mer profiling workflow to generate personalized databases for mass spectrometry
+Céline M. Laumont
+April 17, 2018
+
+1. Generation of the canonical cancer proteome
+
+1.1. Quantification of transcript expression
+
+Run kallisto on trimmed RNA-seq reads: abundance.tsv
+
+
+1.2. Identification of mutations
+
+Run STAR and freeBayes on trimmed RNA-seq reads: sampleName.vcf
+Format the resulting vcf file into a pyGeno agnostic file: sampleName.var.5X.pga
+
+
+1.3. Creation of the pyGeno mutation datawrap
+
+Create the manifest.ini file for your set of mutations as described here:
+http://pygeno.iric.ca/datawraps.html.
+Run the following command line in your terminal to generate the associated datawrap:
+tar -cvzf <sampleNameMut>.tar.gz manifest.ini <sampleName>.var.5X.pga
+
+
+1.4. Creation of the canonical cancer proteome
+
+In the Personalized Proteome section of the capaMHC interface, import your pyGeno mutation
+datawrap using the Add SNPs set button.
+Using the Create personalized proteome button, create your sample’s canonical cancer proteome. 
+You will be asked to import the relevant abundance.tsv file.
+
+Parameters used:
+-- tpm threshold: 0
+-- all others: use default values
+
+Export the resulting fasta file: personalized_proteome_id_<uniqID>.fasta.txt
+Reformat this fasta file to be used in the k-mer profiling workflow using the following command line:
+
+python translation.py -n <sampleName> -pp <path_to_personalized_proteome_id_uniqID.fasta.txt> -o <path_output_directory>
+
+The name of the final file will have the following format:
+sampleName_personalized_proteome_id_uniqID_reformat.fasta
+For help, use:
+python translation.py -h
+
+
+
+2. Generation of the cancer-specific proteome
+
+2.1. k-mer generation
+
+For both your Cancer and Normal samples, sequentially generate the k-mer database from raw
+RNA-seq reads using the following script: kmerGeneration.sh.
+General parameters to be specified:
+-- SAMPLE_NAME: name of the sample
+(ex: sampleName)
+-- PATH_TO_FASTQ: path to sequencing project
+(ex: ’https://bioinfo.iric.ca/seq/0d9a2dd2ce108338bd8273f34d9c452c/C98DJACXX/fastq/’)
+-- REP: path to sample/replicates if more than one, will be concatenated to the PATH_TO_FASTQ
+parameter
+(ex: ’Sample_PLC_12H018/’)
+-- NB_THREADS: number of processors to be used
+Trimmomatic-specific parameters:
+-- qLead: correspond to LEADING parameter
+(used Patrick’s default: 20)
+-- qTrail: corresponds to TRAILING parameter
+(used Patrick’s default: 20)
+-- minLen: corresponds to MINLEN parameter, decided to set it to longest k-mer size to be
+generated (i.e., 33 in our case)
+Jellyfish-specific parameters:
+-- STRANDED: specify the strandeness of the RNA-seq data
+(ex: ’TRUE’ or ’FALSE’)
+-- LEN: list of k-mer lengths
+(ex: (24 33))
+-- HASH_SIZE: initial size of the hash table in jellyfish
+(ex: ’1G’, when working with transcriptomic data)
+-- OUTPATH: path to output directory
+
+After setting all parameters to the desired values, submit your task to the cluster via qsub (about
+20Gb of memory, 8 ppn, should take between 1h and 4h...):
+
+module add torque
+qsub -V -l nodes=1:ppn=8,mem=20Gb,walltime=24:00:00 -m bea -M <yourMail> -N <taskName> kmerGeneration.sh
+
+The resulting k-mer databases will be named as follows:
+sampleName.trim.R1rc.33.jf
+
+
+2.2. k-mer filtering
+
+To extract cancer-specific k-mers, use the following script: 
+kmerFiltering.sh
+
+Parameters to be specified:
+-- SAMPLE_NAME: name of considered sample
+(ex: sampleName)
+-- PATH_TO_JF: path to jf database of 33-nt-long cancer k-mers
+(ex: Cancer.trim.R1rc.33.jf)
+-- LCOUNT: minimal occurence for cancer k-mers to be considered expressed (≥), needs to be
+adjusted to get a maximum of 30M cancer-specific k-mers
+(ex: 10)
+-- PATH_TO_JF_FILTER: list of paths to jf database of 33-nt-long normal k-mers. k-mer
+filtering will be sequential
+(ex: (’Normal1.trim.R1rc.33.jf’ ’Normal2.trim.R1rc.33.jf’))
+-- PATH_OUT: path to output directory
+
+Resulting files of cancer-specific k-mers will be named:
+* sampleName.10.allcount: list of all k-mers having an occurrence ≥ to LCOUNT and their associated count in all samples (cancer and normal(s))
+* sampleName.10.Normal1.0.count: list of k-mers absent from the first normal database
+* sampleName.10.Normal1.0.Normal2.0.count : list of k-mers absent from the first and second normal databases
+* sampleName.10.filtering: number of k-mers after each filtering step
+
+Any file with the .count extension can be submitted to k-mer assembly.
+
+#### Verification needed
+we should strive for 10-30M kmers once the filtering is done
+% wc -l kmerFilt/*count
+  100160637 kmerFilt/OV633ascites.10.allcount
+  12039944 kmerFilt/OV633ascites.10.mtechumanAll.0.count
+
+12M : good !
+
+
+2.3. kmer assembly
+
+Create the required tab-delimited project file (sampleName.10.Normal1.0.project):
+SAMPLE	JF	GROUP
+sampleName	sampleName.trim.R1rc.33.jf	Ref
+
+Perform k-mer assembly using the following script: 
+kmerAssembly.sh
+
+Parameters to be specified:
+-- PROJECT_FILE: path to project file (ex: sampleName.10.Normal1.0.project)
+-- KMER_FILE: path to k-mer file (ex: sampleName.10.Normal1.0.count)
+-- KLEN: k-mer length (ex: 33)
+-- ASS_TYPE: specifiy the type of assembly to be performed. 
+It is recommended to use the linear assembly as it is faster and more exhaustive than the graph assembly (ex: ’linear’ or ’graph’)
+-- CHECK_RC: specifiy if reverse complement sequences should be checked during k-mer assembly. 
+Set this parameter to no when working with stranded RNA-seq data (ex: ’TRUE’ or ’FALSE’)
+-- PATH_OUT: path to output directory
+
+Both the assembly.tab and assembly.fasta files will be used in the in silico translation step.
+
+
+2.4. in silico translation
+
+Translate your contigs (i.e., set of assembled k-mers) using the script translation.py.
+All keys, except the -pp key, should be used.
+
+For help, use:
+python translation.py -h
+
+Running with default parameters, the command line will look like this:
+
+% python ../scripts/translation.py -n <sampleName> -cf contigs/<bla>/assembly.fasta -ct contigs/<bla>/assembly.tab -o dbMS/
+
+This should output the following file: sampleName_34_3-frame_8.fasta
+
+
+
+3. Generation of the global cancer proteome
+
+Concatenate the reformated canonical cancer proteome and the cancer-specific proteome with the following command line:
+
+% cat sampleName_personalized_proteome_id_uniqID_reformat.fasta sampleName_34_3-frame_8.fasta > sampleName_<LCOUNT>__PPuniqID.fasta,
+
+LCOUNT being the minimal occurence for cancer k-mers to be considered expressed (see Section kmer filtering).
+
+For each analyzed sample, submit to capaMHC the following fasta files:
+-- sampleName_personalized_proteome_id_uniqID_reformat.fasta (control database)
+-- sampleName_<LCOUNT>__PPuniqID.fasta (concatenated database)
